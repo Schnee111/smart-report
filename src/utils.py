@@ -1,47 +1,74 @@
 import cv2
 import numpy as np
-import random
+from inference_sdk import InferenceHTTPClient
+import streamlit as st
+import sys
 
-# Warna Bounding Box (Format BGR untuk OpenCV)
-COLOR_CRITICAL = (0, 0, 255) # Merah
-COLOR_MINOR = (0, 255, 255)  # Kuning
-COLOR_GOOD = (0, 255, 0)     # Hijau
+# --- KONFIGURASI ROBOFLOW (LOAD DARI SECRETS) ---
+try:
+    # Mengambil value dari .streamlit/secrets.toml
+    API_KEY = st.secrets["ROBOFLOW_API_KEY"]
+    WORKSPACE_NAME = st.secrets["ROBOFLOW_WORKSPACE"]
+    WORKFLOW_ID = st.secrets["ROBOFLOW_WORKFLOW"]
+except FileNotFoundError:
+    st.error("❌ File .streamlit/secrets.toml tidak ditemukan!")
+    st.stop()
+except KeyError as e:
+    st.error(f"❌ Key {e} tidak ditemukan di secrets.toml")
+    st.stop()
 
-def simulate_ai_detection(frame):
-    """
-    Fungsi ini mensimulasikan model AI (YOLO/CNN) yang mendeteksi objek
-    pada setiap frame video.
-    """
-    # Ambil dimensi frame
-    height, width = frame.shape[:2]
+# Inisialisasi Client
+client = InferenceHTTPClient(
+    api_url="https://detect.roboflow.com",
+    api_key=API_KEY
+)
+
+# Warna Bounding Box
+COLOR_BOX = (0, 0, 255) 
+
+def run_ai_workflow(frame): 
+    predictions = []
     
-    # --- SIMULASI MODEL PREDICTION ---
-    # Di sini nanti Anda ganti dengan: results = model(frame)
-    
-    # Kita buat simulasi deteksi random agar terlihat seolah-olah AI bekerja
-    # Probabilitas muncul deteksi
-    if random.random() < 0.3: 
-        # Koordinat Box Random (Simulasi lokasi kerusakan)
-        x1 = random.randint(50, width - 150)
-        y1 = random.randint(50, height - 150)
-        x2 = x1 + random.randint(50, 200)
-        y2 = y1 + random.randint(50, 200)
+    try:
+        result = client.run_workflow(
+            workspace_name=WORKSPACE_NAME,
+            workflow_id=WORKFLOW_ID,
+            images={"image": frame}
+        )
         
-        # Tentukan jenis kerusakan random
-        damage_type = random.choice(["Retak (Crack)", "Noda (Stain)", "Goresan", "Cat Kelupas"])
-        confidence = random.randint(75, 99)
+        # ... (Lanjutkan kode parsing seperti sebelumnya) ...
+        prediction_result = result[0]
+        raw_preds = prediction_result.get("predictions", [])
         
-        # 1. Gambar Kotak (Bounding Box)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_CRITICAL, 2)
+        if not raw_preds:
+            for key, val in prediction_result.items():
+                if isinstance(val, dict) and "predictions" in val:
+                    raw_preds = val["predictions"]
+                    break
         
-        # 2. Tambahkan Label & Confidence
-        label = f"{damage_type} {confidence}%"
-        
-        # Background label agar terbaca
-        (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-        cv2.rectangle(frame, (x1, y1 - 20), (x1 + w, y1), COLOR_CRITICAL, -1)
-        
-        # Teks Putih
-        cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        for p in raw_preds:
+            x, y, w, h = p['x'], p['y'], p['width'], p['height']
+            label = p['class']
+            conf = p['confidence']
+            
+            predictions.append({
+                "class": label,
+                "confidence": conf
+            })
 
-    return frame
+            x1 = int(x - w/2)
+            y1 = int(y - h/2)
+            x2 = int(x + w/2)
+            y2 = int(y + h/2)
+            
+            cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_BOX, 2)
+            
+            text = f"{label} {int(conf*100)}%"
+            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            cv2.rectangle(frame, (x1, y1 - 20), (x1 + tw, y1), COLOR_BOX, -1)
+            cv2.putText(frame, text, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+
+    except Exception as e:
+        print(f"Workflow Error: {e}")
+    
+    return frame, predictions

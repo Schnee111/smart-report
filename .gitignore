@@ -2,6 +2,7 @@
 venv/
 env/
 .env
+.streamlit/secrets.toml
 
 # --- Python Cache & Compiled Files ---
 # File sampah hasil compile Python
