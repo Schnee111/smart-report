@@ -21,7 +21,6 @@ class VideoProcessor(VideoTransformerBase):
         img = frame.to_ndarray(format="bgr24")
         self.frame_count += 1
         
-        # Frame Skipping untuk performa
         if self.frame_count % self.skip_rate != 0 and self.last_frame is not None:
             return self.last_frame
             
@@ -29,7 +28,6 @@ class VideoProcessor(VideoTransformerBase):
         new_h = int(h * (640 / w))
         img_small = cv2.resize(img, (640, new_h))
         
-        # Panggil AI
         annotated_img, preds = utils.run_ai_workflow(img_small)
         
         with self.lock:
@@ -43,7 +41,6 @@ def calculate_score(unique_counts):
     deduction = 0
     is_critical_failure = False
     
-    # Kriteria Penilaian 3 Kelas
     if unique_counts.get("dudukan_rusak", 0) > 0:
         is_critical_failure = True
         deduction = 90
@@ -72,7 +69,6 @@ def show():
     db.init_db()
     st.title("📹 AI Facility Audit")
     
-    # Metadata Lokasi
     with st.container():
         c1, c2 = st.columns(2)
         lokasi_gedung = c1.selectbox("Gedung", ["FPMIPA A", "FPMIPA B", "FPMIPA C"])
@@ -82,20 +78,19 @@ def show():
     mode = st.radio("Metode Input:", ["Live Camera (15s Audit)", "Upload Video File"], horizontal=True)
 
     # ==========================================
-    # MODE 1: LIVE CAMERA (AUTO STOP 15S)
+    # MODE 1: LIVE CAMERA (AUTO SAVE)
     # ==========================================
     if mode == "Live Camera (15s Audit)":
         
-        # State Management untuk Live Scan
         if "scan_active" not in st.session_state: st.session_state.scan_active = False
         if "scan_finished" not in st.session_state: st.session_state.scan_finished = False
         if "live_results" not in st.session_state: st.session_state.live_results = Counter()
         if "start_time" not in st.session_state: st.session_state.start_time = 0
+        if "save_status" not in st.session_state: st.session_state.save_status = None # Untuk pesan sukses
 
         col_vid, col_instr = st.columns([1.8, 1])
         
         with col_vid:
-            # Webrtc selalu mount agar kamera siap
             ctx = webrtc_streamer(
                 key="scanner-live", 
                 video_processor_factory=VideoProcessor,
@@ -105,89 +100,90 @@ def show():
             )
 
         with col_instr:
-            st.markdown("##### 📋 Instruksi Audit")
-            st.info("1. Tekan tombol **MULAI SCAN**.\n2. Putari objek 360° perlahan.\n3. Waktu scan otomatis berhenti dalam **15 detik**.")
+            st.markdown("##### 📋 Instruksi")
+            st.info("1. Klik **MULAI SCAN**.\n2. Putari objek 360°.\n3. **Otomatis** berhenti & simpan dalam 15 detik.")
             
-            # Tombol Kontrol
+            # Tombol Mulai
             if not st.session_state.scan_active and not st.session_state.scan_finished:
                 if st.button("▶️ MULAI SCAN (15 Detik)", type="primary", use_container_width=True):
-                    st.session_state.scan_active = True
-                    st.session_state.live_results = Counter() # Reset hasil
-                    st.session_state.start_time = time.time()
-                    st.rerun()
+                    if not lokasi_ruang:
+                        st.error("⚠️ Isi Ruangan dulu!")
+                    else:
+                        st.session_state.scan_active = True
+                        st.session_state.live_results = Counter()
+                        st.session_state.start_time = time.time()
+                        st.session_state.save_status = None
+                        st.rerun()
 
-            # Tampilan Saat Scanning Berjalan
+            # Proses Scan Berjalan
             if st.session_state.scan_active:
                 elapsed = time.time() - st.session_state.start_time
                 remaining = 15 - elapsed
                 
-                # Progress Bar Waktu
                 prog_val = min(elapsed / 15, 1.0)
-                st.progress(prog_val, text=f"⏳ Menganalisis... Sisa waktu: {int(remaining)}s")
+                st.progress(prog_val, text=f"⏳ Menganalisis... {int(remaining)}s")
                 
-                # Ambil data dari processor
                 if ctx.video_transformer:
                     with ctx.video_transformer.lock:
                         preds = ctx.video_transformer.latest_predictions
-                    
                     if preds:
                         curr = Counter([p['class'] for p in preds])
-                        # Max Pooling Aggregation
                         for k, v in curr.items():
                             if v > st.session_state.live_results[k]:
                                 st.session_state.live_results[k] = v
 
-                # Cek jika waktu habis
+                # JIKA WAKTU HABIS -> AUTO SAVE
                 if elapsed >= 15:
+                    final_res = st.session_state.live_results
+                    score, deduc, stat = calculate_score(final_res)
+                    
+                    # Simpan ke DB Langsung
+                    db.create_laporan(lokasi_gedung, lokasi_ruang, str(dict(final_res)), score, stat, "Auto-Save Live (15s)")
+                    
+                    # Update State
                     st.session_state.scan_active = False
                     st.session_state.scan_finished = True
-                    st.rerun()
+                    st.session_state.save_status = "Sukses"
+                    st.rerun() # Refresh agar masuk ke blok finish
                 else:
-                    time.sleep(0.5) # Refresh rate UI
-                    st.rerun() # Force UI update untuk timer berjalan halus
+                    time.sleep(0.5)
+                    st.rerun()
 
             # Tampilan Setelah Selesai
             if st.session_state.scan_finished:
-                st.success("✅ Waktu Habis! Analisis Selesai.")
+                if st.session_state.save_status == "Sukses":
+                    st.balloons()
+                    st.success(f"✅ Waktu Habis. Data Ruangan {lokasi_ruang} tersimpan otomatis!")
                 
-                final_res = st.session_state.live_results
-                score, deduc, stat = calculate_score(final_res)
+                res = st.session_state.live_results
+                score, deduc, stat = calculate_score(res)
                 
                 st.metric("Skor Akhir", f"{score}%", f"-{deduc}%", delta_color="inverse")
                 st.metric("Status", stat)
-                st.json(dict(final_res))
+                st.json(dict(res))
                 
-                if st.button("💾 Simpan Hasil", type="primary", use_container_width=True):
-                    if lokasi_ruang:
-                        db.create_laporan(lokasi_gedung, lokasi_ruang, str(dict(final_res)), score, stat, "Live Audit (15s)")
-                        st.success("Tersimpan!")
-                        # Reset untuk scan berikutnya
-                        time.sleep(2)
-                        st.session_state.scan_finished = False
-                        st.rerun()
-                    else:
-                        st.error("Isi Ruangan dulu!")
-                
-                if st.button("🔄 Ulangi Scan"):
+                if st.button("🔄 Scan Objek Lain"):
                     st.session_state.scan_finished = False
+                    st.session_state.save_status = None
                     st.rerun()
 
     # ==========================================
-    # MODE 2: UPLOAD VIDEO (CACHING SYSTEM)
+    # MODE 2: UPLOAD VIDEO (AUTO SAVE NO LOOP)
     # ==========================================
     elif mode == "Upload Video File":
         uploaded_video = st.file_uploader("Pilih video (.mp4)", type=["mp4", "avi"])
         
-        # State untuk caching hasil upload agar tidak reprocessing
+        # State Management
         if "last_video_name" not in st.session_state: st.session_state.last_video_name = None
         if "video_results" not in st.session_state: st.session_state.video_results = None
+        if "upload_success" not in st.session_state: st.session_state.upload_success = False
 
         if uploaded_video:
-            # Cek apakah ini video baru atau video yang sama?
+            # Cek apakah video ini BARU?
             is_new_video = (st.session_state.last_video_name != uploaded_video.name)
             
             if is_new_video:
-                # --- PROSES VIDEO (Hanya Jalan Sekali) ---
+                # --- BLOK PROSES (Hanya jalan 1x per file) ---
                 if not lokasi_ruang:
                     st.error("⚠️ Mohon isi Nama Ruangan di atas terlebih dahulu!")
                     st.stop()
@@ -200,16 +196,14 @@ def show():
                 col_video, col_prog = st.columns([1.8, 1])
                 
                 with col_prog:
-                    st.info("⚙️ Sedang Menganalisis Video...")
+                    st.info("⚙️ Menganalisis Video & Auto-Save...")
                     prog_bar = st.progress(0)
-                    txt_stat = st.empty()
                 
                 with col_video:
                     stframe = st.empty()
 
                 video_defects = Counter()
                 total_frames = int(vf.get(cv2.CAP_PROP_FRAME_COUNT))
-                SKIP = 30
                 curr = 0
                 
                 while vf.isOpened():
@@ -218,7 +212,7 @@ def show():
                     curr += 1
                     
                     if curr % 5 == 0: prog_bar.progress(min(curr/total_frames, 1.0))
-                    if curr % SKIP != 0: continue
+                    if curr % 30 != 0: continue # Skip frame
                     
                     h, w = frame.shape[:2]
                     new_h = int(h * (480 / w))
@@ -235,17 +229,34 @@ def show():
 
                 vf.release()
                 
-                # SIMPAN HASIL KE CACHE SESSION STATE
+                # --- AUTO SAVE LOGIC (Di sini kuncinya) ---
+                final_score, deduction, status = calculate_score(video_defects)
+                
+                # 1. Simpan DB
+                db.create_laporan(lokasi_gedung, lokasi_ruang, str(dict(video_defects)), final_score, status, f"Auto-Video: {uploaded_video.name}")
+                
+                # 2. Update Session State (Agar tidak looping)
                 st.session_state.last_video_name = uploaded_video.name
                 st.session_state.video_results = video_defects
-                st.rerun() # Rerun agar masuk ke blok 'else' (menampilkan hasil)
+                st.session_state.upload_success = True
+                
+                # 3. Rerun untuk refresh UI ke mode "Tampil Hasil"
+                st.rerun()
 
             else:
-                # --- TAMPILKAN HASIL DARI CACHE (Tidak Proses Ulang) ---
+                # --- BLOK TAMPIL HASIL (Statik) ---
+                # Masuk sini jika nama video sama dengan yang di memori
+                
+                if st.session_state.upload_success:
+                    st.balloons()
+                    st.success(f"✅ Analisis Selesai. Data Ruangan {lokasi_ruang} Tersimpan Otomatis!")
+                    # Reset flag success agar balloon tidak muncul terus jika user klik tab lain
+                    st.session_state.upload_success = False 
+                else:
+                    st.info("📂 Menampilkan data hasil analisis sebelumnya.")
+
                 res = st.session_state.video_results
                 score, deduc, stat = calculate_score(res)
-                
-                st.success("Analisis Video Selesai (Cached)")
                 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Temuan Unik", sum(res.values()))
@@ -253,7 +264,4 @@ def show():
                 c3.metric("Status", stat)
                 
                 st.json(dict(res))
-                
-                if st.button("💾 Simpan Laporan Video", type="primary", use_container_width=True):
-                    db.create_laporan(lokasi_gedung, lokasi_ruang, str(dict(res)), score, stat, f"Video: {uploaded_video.name}")
-                    st.success("Data tersimpan ke database!")
+                st.caption("ℹ️ Untuk memproses video lain, silakan klik 'Browse files' dan pilih file baru.")
