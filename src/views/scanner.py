@@ -316,9 +316,7 @@ def show():
                 # Masuk sini jika nama video sama dengan yang di memori
                 
                 if st.session_state.upload_success:
-                    st.balloons()
-                    st.success(f"✅ Analisis Selesai. Data Ruangan {lokasi_ruang} Tersimpan Otomatis!")
-                    # Reset flag success agar balloon tidak muncul terus jika user klik tab lain
+                    st.success(f"✅ Analisis Selesai. Data Kursi di {lokasi_ruang} Tersimpan Otomatis!")
                     st.session_state.upload_success = False 
                 else:
                     st.info("📂 Menampilkan data hasil analisis sebelumnya.")
